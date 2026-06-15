@@ -29,8 +29,9 @@ on:
         default: false
     # Secrets injected via "secrets: inherit" from caller.
     # Expected in calling repo:
-    #   SERVICE_ENV_FILE  — full .env content
-    #   GH_PAT            — PAT for cross-repo checkouts (org-level)
+    #   SERVICE_ENV_STAGING — full .env content for staging
+    #   SERVICE_ENV_PROD    — full .env content for production
+    #   GH_PAT              — PAT for cross-repo checkouts (org-level)
 
 jobs:
   build:
@@ -104,7 +105,12 @@ jobs:
 
       - name: Write .env
         working-directory: ${{ inputs.working_directory }}
-        run: printf '%s\n' "${{ secrets.SERVICE_ENV_FILE }}" | sed 's/\r$//' > .env
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            printf '%s\n' "${{ secrets.SERVICE_ENV_PROD }}" | sed 's/\r$//' > .env
+          else
+            printf '%s\n' "${{ secrets.SERVICE_ENV_STAGING }}" | sed 's/\r$//' > .env
+          fi
 
       - name: Install dependencies
         working-directory: ${{ inputs.working_directory }}

@@ -12,14 +12,20 @@ on:
         required: false
         type: boolean
         default: false
+      checkout_krang:
+        description: 'Checkout Krang alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
       checkout_renenutet:
         description: 'Checkout Renenutet alongside (for link: deps)'
         required: false
         type: boolean
         default: false
     # Secrets via "secrets: inherit":
-    #   SERVICE_ENV_FILE  — full .env content
-    #   GH_PAT            — PAT for cross-repo checkouts (org-level)
+    #   SERVICE_ENV_STAGING — full .env content for staging
+    #   SERVICE_ENV_PROD    — full .env content for production
+    #   GH_PAT              — PAT for cross-repo checkouts (org-level)
 
 jobs:
   build:
@@ -35,6 +41,14 @@ jobs:
         with:
           repository: 57regiment/wan-shi-tong
           path: ../wan-shi-tong
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout Krang
+        if: inputs.checkout_krang
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/Krang
+          path: ../Krang
           token: ${{ secrets.GH_PAT }}
 
       - name: Checkout Renenutet
@@ -58,6 +72,13 @@ jobs:
                   --filter @57eme-regiment/auth-browser \
                build
 
+      - name: Install & build Krang contract
+        if: inputs.checkout_krang
+        working-directory: ../Krang/API
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @57eme-regiment/krang-api-contract build
+
       - name: Install & build Renenutet contract
         if: inputs.checkout_renenutet
         working-directory: ../Renenutet
@@ -66,7 +87,12 @@ jobs:
           pnpm --filter @57eme-regiment/renenutet-api-contract build
 
       - name: Write .env
-        run: printf '%s\n' "${{ secrets.SERVICE_ENV_FILE }}" | sed 's/\r$//' > .env
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            printf '%s\n' "${{ secrets.SERVICE_ENV_PROD }}" | sed 's/\r$//' > .env
+          else
+            printf '%s\n' "${{ secrets.SERVICE_ENV_STAGING }}" | sed 's/\r$//' > .env
+          fi
 
       - name: Restore Vite build cache
         uses: actions/cache@v4
