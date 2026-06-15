@@ -1,0 +1,181 @@
+name: _reusable — Build & Push Docker image
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+      registry:
+        required: false
+        type: string
+        default: 'ghcr.io/57regiment'
+      dockerfile:
+        description: 'Path to Dockerfile relative to repo root'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      extract_tarball:
+        description: 'Extract runtime.tar.gz before Docker build (false for Vite dist/)'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      target:
+        value: ${{ jobs.docker.outputs.target }}
+      tag_primary:
+        value: ${{ jobs.docker.outputs.tag_primary }}
+      tag_secondary:
+        value: ${{ jobs.docker.outputs.tag_secondary }}
+    # Secrets via "secrets: inherit":
+    #   GITHUB_TOKEN  — auto, for GHCR push
+    #   GHCR_PAT      — PAT for deploy-time pulls (org-level)
+    #   GHCR_USERNAME — username for PAT (org-level)
+
+jobs:
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      target: ${{ steps.meta.outputs.target }}
+      tag_primary: ${{ steps.tags.outputs.tag_primary }}
+      tag_secondary: ${{ steps.tags.outputs.tag_secondary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: artifact
+
+      - name: Extract runtime artifact (API — tarball)
+        if: inputs.extract_tarball
+        run: tar -xzf artifact/runtime.tar.gz
+
+      - name: Copy dist artifact (Vite SPA)
+        if: '!inputs.extract_tarball'
+        run: cp -r artifact/ dist/
+
+      # ── Decide staging / prod / none ───────────────────────────────────────
+
+      - name: Decide target & platforms
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="none"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TARGET="prod"
+          elif [[ "${GITHUB_REF}" == "refs/heads/develop" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TARGET="staging"
+          fi
+          if [[ "$TARGET" == "prod" ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "Decided target: $TARGET"
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA::7}"
+          REGISTRY="${{ inputs.registry }}"
+          IMAGE="${{ inputs.image_name }}"
+          case "${{ steps.meta.outputs.target }}" in
+            staging)
+              echo "tag_primary=${REGISTRY}/${IMAGE}:staging" >> "$GITHUB_OUTPUT"
+              echo "tag_secondary=${REGISTRY}/${IMAGE}:staging-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+              ;;
+            prod)
+              VER="${GITHUB_REF_NAME}"
+              echo "tag_primary=${REGISTRY}/${IMAGE}:${VER}" >> "$GITHUB_OUTPUT"
+              echo "tag_secondary=${REGISTRY}/${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "tag_primary=${REGISTRY}/${IMAGE}:pr-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+              echo "tag_secondary=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # ── Push / cache policy ────────────────────────────────────────────────
+
+      - name: Decide push & cache policy
+        id: policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ steps.meta.outputs.target }}"
+          IS_PR="${{ github.event_name == 'pull_request' }}"
+          PUSH=false
+          if [[ "$TARGET" == "prod" && "${GITHUB_REF}" == refs/tags/v* && "$IS_PR" != "true" ]]; then
+            PUSH=true
+          elif [[ "$TARGET" == "staging" && "$IS_PR" != "true" ]]; then
+            PUSH=true
+          fi
+          USE_GHA_CACHE=false
+          [[ "$PUSH" != "true" ]] && USE_GHA_CACHE=true
+          echo "push=$PUSH" >> "$GITHUB_OUTPUT"
+          echo "use_gha_cache=$USE_GHA_CACHE" >> "$GITHUB_OUTPUT"
+          echo "policy → push=$PUSH gha_cache=$USE_GHA_CACHE target=$TARGET"
+
+      # ── Docker setup ───────────────────────────────────────────────────────
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU (multi-arch prod builds)
+        if: contains(steps.meta.outputs.platforms, 'arm64')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Login to GHCR
+        if: steps.policy.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build only (PRs / target=none) ────────────────────────────────────
+
+      - name: Build (no push)
+        if: steps.policy.outputs.push != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ steps.meta.outputs.platforms }}
+          push: false
+          provenance: false
+          tags: ${{ steps.tags.outputs.tag_primary }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Build & push (develop / tags) ─────────────────────────────────────
+
+      - name: Build & Push
+        if: steps.policy.outputs.push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ steps.meta.outputs.platforms }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.tags.outputs.tag_primary }}
+            ${{ steps.tags.outputs.tag_secondary }}
+          cache-from: type=registry,ref=${{ inputs.registry }}/${{ inputs.image_name }}:buildcache
+          cache-to: type=registry,ref=${{ inputs.registry }}/${{ inputs.image_name }}:buildcache,mode=max

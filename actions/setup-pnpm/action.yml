@@ -1,0 +1,35 @@
+name: 'Setup pnpm'
+description: 'Enable Corepack, activate the pnpm version from package.json, setup Node 22 with store cache'
+
+inputs:
+  working_directory:
+    description: 'Directory containing package.json with packageManager field'
+    required: false
+    default: '.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Enable Corepack & activate pinned pnpm
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -euo pipefail
+        corepack enable
+        VERSION=$(node -e "
+          try {
+            const pm = require('./package.json').packageManager || '';
+            const m = pm.match(/pnpm@(.+)/);
+            console.log(m ? m[1] : '11');
+          } catch(e) { console.log('11'); }
+        ")
+        echo "pnpm version: $VERSION"
+        corepack prepare pnpm@${VERSION} --activate
+        pnpm --version
+
+    - name: Setup Node 22 with pnpm store cache
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'pnpm'
+        cache-dependency-path: ${{ inputs.working_directory }}/pnpm-lock.yaml

@@ -1,0 +1,65 @@
+name: _reusable — SSH Deploy
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'staging | prod'
+        required: true
+        type: string
+      image_name:
+        required: true
+        type: string
+      registry:
+        required: false
+        type: string
+        default: 'ghcr.io/57regiment'
+    # Secrets via "secrets: inherit":
+    #   SSH_HOST        — remote server hostname (org-level)
+    #   SSH_USER        — SSH user (org-level)
+    #   SSH_KEY         — private key (org-level)
+    #   SSH_PORT        — SSH port, optional (org-level)
+    #   GHCR_PAT        — PAT to pull images on server (org-level)
+    #   GHCR_USERNAME   — username for PAT (org-level)
+    #   COMPOSE_STAGING — path to staging compose file on server (repo-level)
+    #   COMPOSE_PROD    — path to prod compose file on server (repo-level)
+
+jobs:
+  deploy:
+    name: Deploy (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target }}
+
+    steps:
+      - name: Choose compose file
+        id: compose
+        shell: bash
+        run: |
+          if [[ "${{ inputs.target }}" == "prod" ]]; then
+            echo "file=${{ secrets.COMPOSE_PROD }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=${{ secrets.COMPOSE_STAGING }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            echo "${{ secrets.GHCR_PAT }}" | \
+              docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+            COMPOSE_FILE="${{ steps.compose.outputs.file }}"
+            echo "Deploying ${{ inputs.image_name }} (${{ inputs.target }}) via $COMPOSE_FILE"
+
+            docker compose -f "$COMPOSE_FILE" pull --ignore-pull-failures
+            docker compose -f "$COMPOSE_FILE" up -d --no-deps
+
+            echo "── Running containers ──"
+            docker compose -f "$COMPOSE_FILE" ps

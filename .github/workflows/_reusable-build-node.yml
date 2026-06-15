@@ -1,0 +1,137 @@
+name: _reusable — Build Node API
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: 'Name of the uploaded artifact'
+        required: true
+        type: string
+      working_directory:
+        description: 'Subdirectory containing package.json (use . for root)'
+        required: false
+        type: string
+        default: '.'
+      checkout_wan_shi_tong:
+        description: 'Checkout wan-shi-tong alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
+      checkout_krang:
+        description: 'Checkout Krang alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
+      checkout_renenutet:
+        description: 'Checkout Renenutet alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
+    # Secrets injected via "secrets: inherit" from caller.
+    # Expected in calling repo:
+    #   SERVICE_ENV_FILE  — full .env content
+    #   GH_PAT            — PAT for cross-repo checkouts (org-level)
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── External repo checkouts (sibling directories) ─────────────────────
+      # link: paths in package.json expect siblings at ../wan-shi-tong, etc.
+
+      - name: Checkout wan-shi-tong
+        if: inputs.checkout_wan_shi_tong
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/wan-shi-tong
+          path: ../wan-shi-tong
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout Krang
+        if: inputs.checkout_krang
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/Krang
+          path: ../Krang
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout Renenutet
+        if: inputs.checkout_renenutet
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/Renenutet
+          path: ../Renenutet
+          token: ${{ secrets.GH_PAT }}
+
+      # ── Setup pnpm ─────────────────────────────────────────────────────────
+
+      - name: Setup pnpm
+        uses: 57regiment/.github/actions/setup-pnpm@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+
+      # ── Build external packages so their dist/ exists ──────────────────────
+
+      - name: Install & build wan-shi-tong packages
+        if: inputs.checkout_wan_shi_tong
+        working-directory: ../wan-shi-tong
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r --filter @57eme-regiment/auth-contracts \
+                  --filter @57eme-regiment/auth-server \
+                  --filter @57eme-regiment/auth-browser \
+               build
+
+      - name: Install & build Krang contract
+        if: inputs.checkout_krang
+        working-directory: ../Krang/API
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @57eme-regiment/krang-api-contract build
+
+      - name: Install & build Renenutet contract
+        if: inputs.checkout_renenutet
+        working-directory: ../Renenutet
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @57eme-regiment/renenutet-api-contract build
+
+      # ── Main build ─────────────────────────────────────────────────────────
+
+      - name: Write .env
+        working-directory: ${{ inputs.working_directory }}
+        run: printf '%s\n' "${{ secrets.SERVICE_ENV_FILE }}" | sed 's/\r$//' > .env
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: ${{ inputs.working_directory }}
+        run: pnpm build
+
+      - name: Prune dev dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: pnpm prune --prod
+
+      # --dereference follows link: symlinks so Docker has the real files
+      - name: Package runtime artifact
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          tar --dereference -czf runtime.tar.gz \
+            dist/ \
+            node_modules/ \
+            package.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.working_directory }}/runtime.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0

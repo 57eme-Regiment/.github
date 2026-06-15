@@ -1,0 +1,94 @@
+name: _reusable — Build Vite SPA
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: 'Name of the uploaded artifact'
+        required: true
+        type: string
+      checkout_wan_shi_tong:
+        description: 'Checkout wan-shi-tong alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
+      checkout_renenutet:
+        description: 'Checkout Renenutet alongside (for link: deps)'
+        required: false
+        type: boolean
+        default: false
+    # Secrets via "secrets: inherit":
+    #   SERVICE_ENV_FILE  — full .env content
+    #   GH_PAT            — PAT for cross-repo checkouts (org-level)
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout wan-shi-tong
+        if: inputs.checkout_wan_shi_tong
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/wan-shi-tong
+          path: ../wan-shi-tong
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout Renenutet
+        if: inputs.checkout_renenutet
+        uses: actions/checkout@v4
+        with:
+          repository: 57regiment/Renenutet
+          path: ../Renenutet
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup pnpm
+        uses: 57regiment/.github/actions/setup-pnpm@main
+
+      - name: Install & build wan-shi-tong packages
+        if: inputs.checkout_wan_shi_tong
+        working-directory: ../wan-shi-tong
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r --filter @57eme-regiment/auth-contracts \
+                  --filter @57eme-regiment/auth-server \
+                  --filter @57eme-regiment/auth-browser \
+               build
+
+      - name: Install & build Renenutet contract
+        if: inputs.checkout_renenutet
+        working-directory: ../Renenutet
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @57eme-regiment/renenutet-api-contract build
+
+      - name: Write .env
+        run: printf '%s\n' "${{ secrets.SERVICE_ENV_FILE }}" | sed 's/\r$//' > .env
+
+      - name: Restore Vite build cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.vite
+          key: vite-${{ runner.os }}-${{ hashFiles('vite.config.*', 'package.json') }}
+          restore-keys: vite-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
